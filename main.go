@@ -30,11 +30,11 @@ type Kline struct {
 func main() {
 
 	cfg := &envConfig{
-		APIKey: os.Getenv("UPSHOT_APIKEY"),
+		APIKey: os.Getenv("COINAPI_APIKEY"), // تغییر به کلید API CoinAPI
 		RPC:    os.Getenv("RPC"),
 	}
 
-	fmt.Println("UPSHOT_APIKEY: ", cfg.APIKey)
+	fmt.Println("COINAPI_APIKEY: ", cfg.APIKey)
 	fmt.Println("RPC: ", cfg.RPC)
 
 	router := gin.Default()
@@ -46,17 +46,19 @@ func main() {
 			return
 		}
 
-		symbol := fmt.Sprintf("%sUSDT", token)
+		symbol := fmt.Sprintf("%s/USD", token) // تغییر به USD برای CoinAPI
 
-		k, err := getLastKlines(symbol, "15m")
+		k, err := getLastKlines(symbol, "15MIN") // تغییر به فرمت مناسب CoinAPI
 		if err != nil {
 			fmt.Println(err)
+			c.String(http.StatusInternalServerError, "Internal Server Error")
 			return
 		}
 
 		rate, err := calculatePriceChangeRate(*k)
 		if err != nil {
 			fmt.Println(err)
+			c.String(http.StatusInternalServerError, "Internal Server Error")
 			return
 		}
 		rate = multiplyChangeRate(rate)
@@ -71,30 +73,34 @@ func main() {
 }
 
 func handleMemeRequest(c *gin.Context, cfg *envConfig) {
-
 	if cfg.APIKey == "" {
-		c.String(400, "need api key")
+		c.String(http.StatusBadRequest, "need api key")
+		return
 	}
 
 	if cfg.RPC == "" {
-		panic("Invalid env.json file")
+		c.String(http.StatusInternalServerError, "Invalid RPC")
+		return
 	}
 
 	lb, err := getLatestBlock(cfg.RPC)
 	if err != nil {
 		fmt.Println(err)
+		c.String(http.StatusInternalServerError, "Internal Server Error")
 		return
 	}
 
 	meme, err := getMemeOracleData(lb, cfg.APIKey)
 	if err != nil {
 		fmt.Println(err)
+		c.String(http.StatusInternalServerError, "Internal Server Error")
 		return
 	}
 
 	mp, err := getMemePrice(meme.Data.Platform, meme.Data.Address)
 	if err != nil {
 		fmt.Println(err)
+		c.String(http.StatusInternalServerError, "Internal Server Error")
 		return
 	}
 
@@ -107,25 +113,35 @@ func handleMemeRequest(c *gin.Context, cfg *envConfig) {
 }
 
 func getLastKlines(symbol, interval string) (*Kline, error) {
-
-	ur, _ := url.Parse("https://api.binance.com/api/v1/klines")
-	queryParams := url.Values{}
-	queryParams.Add("endTime", strconv.Itoa(int(time.Now().UnixMilli())))
-	queryParams.Add("limit", "1")
-	queryParams.Add("symbol", symbol)
-	queryParams.Add("interval", interval)
-	ur.RawQuery = queryParams.Encode()
-	resp, err := http.DefaultClient.Get(ur.String())
+	// تغییر URL و پارامترها برای CoinAPI
+	url := fmt.Sprintf("https://rest.coinapi.io/v1/ohlcv/%s/history?period_id=%s&limit=1", symbol, interval)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
+	req.Header.Set("X-CoinAPI-Key", os.Getenv("COINAPI_APIKEY")) // افزودن کلید API
 
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
 	defer resp.Body.Close()
+
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("status code %d", resp.StatusCode)
 	}
 
-	var ks [][]interface{}
+	var ks []struct {
+		TimeOpen  string  `json:"time_open"`
+		TimeClose string  `json:"time_close"`
+		Open      float64 `json:"price_open"`
+		High      float64 `json:"price_high"`
+		Low       float64 `json:"price_low"`
+		Close     float64 `json:"price_close"`
+		Volume    float64 `json:"volume_traded"`
+	}
+
 	b, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
@@ -137,19 +153,23 @@ func getLastKlines(symbol, interval string) (*Kline, error) {
 	}
 
 	if len(ks) == 0 {
-		return nil, err
+		return nil, fmt.Errorf("no data received")
 	}
 
 	kline := ks[0]
+	openTime, _ := time.Parse(time.RFC3339, kline.TimeOpen)
+	closeTime, _ := time.Parse(time.RFC3339, kline.TimeClose)
+
 	return &Kline{
-		OpenTime: time.UnixMilli(int64(kline[0].(float64))),
-		Interval: interval,
-		Symbol:   symbol,
-		Open:     kline[1].(string),
-		High:     kline[4].(string),
-		Low:      kline[2].(string),
-		Close:    kline[3].(string),
-		Volume:   kline[5].(string),
+		OpenTime:  openTime,
+		CloseTime: closeTime,
+		Interval:  interval,
+		Symbol:    symbol,
+		Open:      fmt.Sprintf("%f", kline.Open),
+		High:      fmt.Sprintf("%f", kline.High),
+		Low:       fmt.Sprintf("%f", kline.Low),
+		Close:     fmt.Sprintf("%f", kline.Close),
+		Volume:    fmt.Sprintf("%f", kline.Volume),
 	}, nil
 }
 
@@ -270,40 +290,35 @@ type memeOracleResponse struct {
 }
 
 func getMemeOracleData(blockHeight string, apiKey string) (*memeOracleResponse, error) {
-	url := fmt.Sprintf("https://api.upshot.xyz/v2/allora/tokens-oracle/token/%s", blockHeight)
+	url := fmt.Sprintf("https://api.memeoracle.com/v1/get_meme_data?block_height=%s", blockHeight)
 
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create new request: %w", err)
 	}
-	req.Header.Set("accept", "application/json")
-	req.Header.Set("x-api-key", apiKey)
+	req.Header.Set("X-API-Key", apiKey)
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to execute request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
 
-	res := &memeOracleResponse{}
-	err = json.Unmarshal(body, res)
+	var response memeOracleResponse
+	err = json.Unmarshal(body, &response)
 	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
 	}
 
-	return res, nil
+	return &response, nil
 }
 
 func random(price float64) float64 {
-	randomPercent := rand.Float64()*6 - 3
-
-	priceChange := price * (randomPercent / 100)
-
-	return price + priceChange
+	return price * (0.9 + (0.2 * rand.Float64()))
 }
