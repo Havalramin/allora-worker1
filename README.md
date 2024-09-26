@@ -39,7 +39,7 @@ docker container prune -f
 
 2. Clone the git repository
 ```
-git clone https://github.com/Havalramin/allora-worker.git
+git clone https://github.com/Havalramin/allora-worker1.git
 cd allora-worker
 ```
 
